@@ -13,6 +13,7 @@ public class OllamaService : IOllamaService
     private readonly HttpClient _httpClient;
     private readonly ILogger<OllamaService> _logger;
 
+
     public OllamaService(ApplicationDbContext context, HttpClient httpClient, ILogger<OllamaService> logger)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
