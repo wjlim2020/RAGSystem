@@ -79,6 +79,7 @@ public class OllamaService : IOllamaService
             var response = await _httpClient.PostAsJsonAsync("http://localhost:11434/api/generate", new
             {
                 model = "deepseek-r1:1.5b",
+                //model = "deepseek-r1:7b",
                 prompt = fullPrompt
             });
 
