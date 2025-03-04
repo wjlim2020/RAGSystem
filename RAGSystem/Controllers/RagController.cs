@@ -31,7 +31,11 @@ public class RagController : ControllerBase
     {
         try
         {
-            var responseJson = await _ollamaService.QueryAsync(query);
+            // Provide default values for temperature and topP
+            float defaultTemperature = 0.3f;
+            float defaultTopP = 0.9f;
+
+            var responseJson = await _ollamaService.QueryAsync(query, defaultTemperature, defaultTopP);
 
             // 🔹 Format response into readable text
             string formattedResponse = ExtractResponses(responseJson);

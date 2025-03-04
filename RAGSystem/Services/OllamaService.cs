@@ -1,10 +1,11 @@
 ﻿using System.Net.Http.Json;
+using RAGSystem.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
 public interface IOllamaService
 {
-    Task<string> QueryAsync(string query);
+    Task<string> QueryAsync(string query, float temperature, float topP);
     Task<float[]> GenerateEmbeddingAsync(string content);
 }
 public class OllamaService : IOllamaService
@@ -19,6 +20,7 @@ public class OllamaService : IOllamaService
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _httpClient = httpClient;
         _logger = logger;
+        _httpClient.Timeout = TimeSpan.FromMinutes(5);
     }
 
     //public async Task<string> QueryAsync(string query)
@@ -54,7 +56,7 @@ public class OllamaService : IOllamaService
     //}
 
 
-    public async Task<string> QueryAsync(string query)
+    public async Task<string> QueryAsync(string query, float temperature, float topP)
     {
         try
         {
@@ -80,7 +82,9 @@ public class OllamaService : IOllamaService
             {
                 model = "deepseek-r1:1.5b",
                 //model = "deepseek-r1:7b",
-                prompt = fullPrompt
+                prompt = fullPrompt,
+                temperature = temperature,
+                top_p = topP,
             });
 
             response.EnsureSuccessStatusCode();
