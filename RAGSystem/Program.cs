@@ -35,6 +35,17 @@ builder.Services.AddSwaggerGen(c =>
 
 builder.Services.AddScoped<IOllamaService, OllamaService>();
 
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAll", policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
+});
+
+
 
 var app = builder.Build();
 
@@ -48,7 +59,7 @@ if (app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 app.UseAuthorization();
 app.MapControllers();
-
+app.UseCors("AllowAll");
 app.UseStaticFiles(); // ✅ 讓前端可以讀取 MP3
 
 app.Run();

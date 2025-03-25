@@ -1,9 +1,16 @@
 ﻿using System.Globalization;
 using System.Text.Json.Serialization;
 using System.Text.Json;
+using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using DocumentFormat.OpenXml.Packaging; // Word & PPT
+using DocumentFormat.OpenXml.Wordprocessing;
+using OfficeOpenXml; // Excel (EPPlus)
+using UglyToad.PdfPig;
+using UglyToad.PdfPig.Content;
+
 
 [ApiController]
 [Route("api/[controller]")]
@@ -32,8 +39,8 @@ public class RagController : ControllerBase
         try
         {
             // Provide default values for temperature and topP
-            float defaultTemperature = 0.3f;
-            float defaultTopP = 0.9f;
+            float defaultTemperature = 0.2f;
+            float defaultTopP = 0.2f;
 
             var responseJson = await _ollamaService.QueryAsync(query, defaultTemperature, defaultTopP);
 
@@ -72,7 +79,7 @@ public class RagController : ControllerBase
     }
 
 
-[HttpPost("upload")]
+    [HttpPost("upload")]
     public async Task<IActionResult> UploadFile([FromForm] UploadFileDto uploadFileDto)
     {
         if (uploadFileDto.File == null || uploadFileDto.File.Length == 0)
@@ -80,13 +87,13 @@ public class RagController : ControllerBase
 
         try
         {
-            using var reader = new StreamReader(uploadFileDto.File.OpenReadStream());
-            var content = await reader.ReadToEndAsync();
+            // 🔹 Extract text content from Office files
+            string content = ExtractTextFromOfficeFile(uploadFileDto.File);
+            if (string.IsNullOrEmpty(content))
+                return BadRequest("Unable to extract content from file.");
 
-            // 🔹 Generate embeddings using the API
+            // 🔹 Generate Embedding for the content
             var embeddingArray = await _ollamaService.GenerateEmbeddingAsync(content);
-
-            // ✅ Convert float[] to comma-separated string
             var embeddingString = string.Join(",", embeddingArray.Select(f => f.ToString(CultureInfo.InvariantCulture)));
 
             var document = new Document
@@ -110,6 +117,7 @@ public class RagController : ControllerBase
 
 
 
+
     [HttpPost("search")]
     public async Task<IActionResult> Search([FromBody] int documentId)
     {
@@ -126,6 +134,96 @@ public class RagController : ControllerBase
     {
         [JsonPropertyName("response")]
         public string Response { get; set; }
+    }
+
+
+
+    private string ExtractTextFromOfficeFile(IFormFile file)
+    {
+        string extension = Path.GetExtension(file.FileName).ToLower();
+
+        using var stream = file.OpenReadStream();
+
+        if (extension == ".docx" || extension == ".doc")
+        {
+            return ExtractTextFromWord(stream);
+        }
+        else if (extension == ".xlsx" || extension == ".xls")
+        {
+            return ExtractTextFromExcel(stream);
+        }
+        else if (extension == ".pptx" || extension == ".ppt")
+        {
+            return ExtractTextFromPowerPoint(stream);
+        }
+        else if (extension == ".pdf")
+        {
+            return ExtractTextFromPdf(stream); 
+        }
+
+        return null;
+    }
+
+    // 🔹 解析 Word 文件 (.docx)
+    private string ExtractTextFromWord(Stream stream)
+    {
+        using WordprocessingDocument doc = WordprocessingDocument.Open(stream, false);
+        StringBuilder sb = new();
+        foreach (var text in doc.MainDocumentPart.Document.Body.Descendants<Text>())
+        {
+            sb.AppendLine(text.Text);
+        }
+        return sb.ToString();
+    }
+
+    // 🔹 解析 Excel 文件 (.xlsx)
+    private string ExtractTextFromExcel(Stream stream)
+    {
+        using var package = new ExcelPackage(stream);
+        StringBuilder sb = new();
+        foreach (var worksheet in package.Workbook.Worksheets)
+        {
+            int rowCount = worksheet.Dimension.Rows;
+            int colCount = worksheet.Dimension.Columns;
+            for (int row = 1; row <= rowCount; row++)
+            {
+                for (int col = 1; col <= colCount; col++)
+                {
+                    sb.Append(worksheet.Cells[row, col].Text + "\t");
+                }
+                sb.AppendLine();
+            }
+        }
+        return sb.ToString();
+    }
+
+    // 🔹 解析 PowerPoint 文件 (.pptx)
+    private string ExtractTextFromPowerPoint(Stream stream)
+    {
+        using PresentationDocument ppt = PresentationDocument.Open(stream, false);
+        StringBuilder sb = new();
+        foreach (var slide in ppt.PresentationPart.SlideParts)
+        {
+            foreach (var text in slide.Slide.Descendants<DocumentFormat.OpenXml.Drawing.Text>())
+            {
+                sb.AppendLine(text.Text);
+            }
+        }
+        return sb.ToString();
+    }
+
+    // 🟢 Extract text from PDF
+    private string ExtractTextFromPdf(Stream stream)
+    {
+        StringBuilder sb = new();
+
+        using PdfDocument document = PdfDocument.Open(stream);
+        foreach (Page page in document.GetPages())
+        {
+            sb.AppendLine(page.Text);
+        }
+
+        return sb.ToString();
     }
 }
 
