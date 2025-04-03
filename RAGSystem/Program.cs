@@ -2,12 +2,15 @@
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Services.AddHttpContextAccessor();
+
 // Add services to the container.
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddLogging();
 builder.Services.AddHttpClient();
+
 
 // Add HttpClient configuration for Ollama
 //var ollamaApiUrl = builder.Configuration["OllamaApi:BaseUrl"];
