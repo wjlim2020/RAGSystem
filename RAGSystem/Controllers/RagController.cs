@@ -10,6 +10,8 @@ using DocumentFormat.OpenXml.Wordprocessing;
 using OfficeOpenXml; // Excel (EPPlus)
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.Content;
+using System.Net.Http;
+using RAGSystem.Models;
 
 
 [ApiController]
@@ -19,13 +21,15 @@ public class RagController : ControllerBase
     private readonly ApplicationDbContext _context;
     private readonly IOllamaService _ollamaService;
     private readonly ILogger<RagController> _logger;
+    private readonly HttpClient _httpClient;
 
     // ✅ Inject ApplicationDbContext in the constructor
-    public RagController(ApplicationDbContext context, IOllamaService ollamaService, ILogger<RagController> logger)
+    public RagController(ApplicationDbContext context, IOllamaService ollamaService, ILogger<RagController> logger ,HttpClient httpClient)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _ollamaService = ollamaService ?? throw new ArgumentNullException(nameof(ollamaService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _httpClient = httpClient;
     }
 
     //public RagController(IOllamaService ollamaService)
@@ -39,8 +43,8 @@ public class RagController : ControllerBase
         try
         {
             // Provide default values for temperature and topP
-            float defaultTemperature = 0.2f;
-            float defaultTopP = 0.2f;
+            float defaultTemperature = 0.4f;
+            float defaultTopP = 0.8f;
 
             var responseJson = await _ollamaService.QueryAsync(query, defaultTemperature, defaultTopP);
 
@@ -78,6 +82,140 @@ public class RagController : ControllerBase
         }
     }
 
+    //[HttpPost("query-v2")]
+    //public async Task<IActionResult> QueryWithMemory([FromBody] QueryRequest request)
+    //{
+    //    try
+    //    {
+    //        // 🔍 撈對話歷史
+    //        var historyList = await _context.ChatHistories
+    //            .Where(c => c.SessionId == request.SessionId)
+    //            .OrderByDescending(c => c.Timestamp)
+    //            .Take(5)
+    //            .ToListAsync();
+
+    //        historyList.Reverse(); // 調整順序：舊 → 新
+
+    //        var sb = new StringBuilder();
+    //        sb.AppendLine("Use the following conversation history to answer the user's question.\n");
+
+    //        foreach (var h in historyList)
+    //        {
+    //            sb.AppendLine($"User: {h.UserQuery}");
+    //            sb.AppendLine($"Assistant: {h.Answer}");
+    //        }
+
+    //        sb.AppendLine($"User: {request.Query}");
+    //        sb.AppendLine("Assistant:");
+
+    //        string prompt = sb.ToString();
+
+    //        // ✅ 設定你要的預設參數
+    //        float defaultTemperature = 0.7f;
+    //        float defaultTopP = 0.2f;
+
+    //        // ✅ 呼叫 Ollama 查詢
+    //        var result = await _ollamaService.QueryAsync(
+    //            prompt,
+    //            defaultTemperature,
+    //            defaultTopP
+    //        );
+
+    //        var formattedAnswer = ExtractResponses(result);
+
+    //        // ✅ 儲存對話
+    //        _context.ChatHistories.Add(new ChatHistory
+    //        {
+    //            SessionId = request.SessionId,
+    //            UserQuery = request.Query,
+    //            Answer = formattedAnswer
+    //        });
+    //        await _context.SaveChangesAsync();
+
+    //        return Ok(new { message = formattedAnswer, sessionId = request.SessionId });
+    //    }
+    //    catch (Exception ex)
+    //    {
+    //        _logger.LogError(ex, "Query failed");
+    //        return StatusCode(500, new { message = "Query failed", detail = ex.Message });
+    //    }
+    //}
+    [HttpPost("query-v2")]
+    public async Task<IActionResult> QueryWithMemory([FromBody] QueryRequest request)
+    {
+        try
+        {
+            // 🔍 撈對話歷史
+            var historyList = await _context.ChatHistories
+                .Where(c => c.SessionId == request.SessionId)
+                .OrderByDescending(c => c.Timestamp)
+                .Take(1)
+                .ToListAsync();
+
+            historyList.Reverse(); // 調整順序：舊 → 新
+
+            var historyPrompt = new StringBuilder();
+            historyPrompt.AppendLine("Use the following conversation history to answer the user's question.\n");
+
+            foreach (var h in historyList)
+            {
+                historyPrompt.AppendLine($"User: {h.UserQuery}");
+                historyPrompt.AppendLine($"Assistant: {h.Answer}");
+            }
+
+            // ✅ 呼叫 embedding API，取得查詢向量
+            var embedding = await _ollamaService.GenerateEmbeddingAsync(request.Query);
+
+            // ✅ 呼叫 Qdrant 查詢相關內容
+            var qdrantRequest = new
+            {
+                embedding = embedding,
+                top_k = 10
+            };
+
+            var qdrantResponse = await _httpClient.PostAsJsonAsync("http://localhost:5002/search", qdrantRequest);
+            qdrantResponse.EnsureSuccessStatusCode();
+            var qdrantResult = await qdrantResponse.Content.ReadFromJsonAsync<OllamaService.QdrantSearchResponse>();
+
+            var contextPrompt = new StringBuilder();
+            foreach (var doc in qdrantResult.Results)
+            {
+                contextPrompt.AppendLine($"[Context from {doc.FileName}]\n{doc.Content}\n");
+            }
+
+            // ✅ 最終 prompt 結合歷史、向量上下文與用戶提問
+            var fullPrompt = new StringBuilder();
+            fullPrompt.AppendLine(historyPrompt.ToString());
+            fullPrompt.AppendLine(contextPrompt.ToString());
+            fullPrompt.AppendLine($"\nUser: {request.Query}");
+            fullPrompt.AppendLine("Assistant:");
+
+            // ✅ 設定你要的參數（可換成前端傳入）
+            float temperature =  0.3f;
+            float topP =  0.2f;
+
+            var result = await _ollamaService.QueryAsync(fullPrompt.ToString(), temperature, topP);
+            var formattedAnswer = ExtractResponses(result);
+
+            // ✅ 儲存對話
+            _context.ChatHistories.Add(new ChatHistory
+            {
+                SessionId = request.SessionId,
+                UserQuery = request.Query,
+                Answer = formattedAnswer
+            });
+            await _context.SaveChangesAsync();
+
+            return Ok(new { message = formattedAnswer, sessionId = request.SessionId });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Query-v2 failed");
+            return StatusCode(500, new { message = "Query-v2 failed", detail = ex.Message });
+        }
+    }
+
+
 
     [HttpPost("upload")]
     public async Task<IActionResult> UploadFile([FromForm] UploadFileDto uploadFileDto)
@@ -107,6 +245,10 @@ public class RagController : ControllerBase
             _context.Documents.Add(document);
             await _context.SaveChangesAsync();
 
+            // 🔹 呼叫 Qdrant Gateway 插入向量資料
+           await _ollamaService.InsertToQdrantAsync(document.Id.ToString(), embeddingArray, document.FileName, document.Content);
+
+
             return Ok(new { message = "File uploaded successfully.", documentId = document.Id });
         }
         catch (Exception ex)
@@ -118,16 +260,39 @@ public class RagController : ControllerBase
 
 
 
+    //[HttpPost("search")]
+    //public async Task<IActionResult> Search([FromBody] int documentId)
+    //{
+    //    var document = await _context.Documents.FirstOrDefaultAsync(d => d.Id == documentId);
+
+    //    if (document == null || document.Embedding == null || document.Embedding.Length == 0)
+    //        return NotFound("Document not found or has no embeddings.");
+
+    //    return Ok(new { documentId, embedding = document.Embedding });
+    //}
+
     [HttpPost("search")]
-    public async Task<IActionResult> Search([FromBody] int documentId)
+    public async Task<IActionResult> Search([FromBody] string query)
     {
-        var document = await _context.Documents.FirstOrDefaultAsync(d => d.Id == documentId);
+        try
+        {
+            // 🔹 產生 embedding
+            var embedding = await _ollamaService.GenerateEmbeddingAsync(query);
 
-        if (document == null || document.Embedding == null || document.Embedding.Length == 0)
-            return NotFound("Document not found or has no embeddings.");
+            // 🔹 呼叫 Qdrant Gateway 查相似文件
+            var json = await _ollamaService.SearchQdrantAsync(embedding);
 
-        return Ok(new { documentId, embedding = document.Embedding });
+            return Ok(new { message = "Search success", results = json });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Search error: {Message}", ex.Message);
+            return StatusCode(500, new { message = "Search failed", detail = ex.ToString() });
+        }
+
     }
+
+
 
     // ✅ Define ResponseData Model
     public class ResponseData
