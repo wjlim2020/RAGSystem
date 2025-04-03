@@ -1,7 +1,3 @@
-using System.Net.Http.Json;
-using RAGSystem.Models;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -13,6 +9,13 @@ public interface IOllamaService
     Task InsertToQdrantAsync(string id, float[] embedding, string fileName, string content);
 
     Task<string> SearchQdrantAsync(float[] embedding, int topK = 3);
+
+    public string OllamaApiUrl { get; }
+    public string QdrantApiUrl { get; }
+    public string OllamaApiGenerateUrl { get; }
+    public string OllamaApiEmbeddingUrl { get; }
+    public string QdrantFastApiUrl { get; }
+    public string QdrantDbUrl { get; }
 }
 public class OllamaService : IOllamaService
 {
@@ -38,6 +41,10 @@ public class OllamaService : IOllamaService
     {
         get => _configuration["OllamaApi:BaseUrl"] + "api/";
     }
+    public string QdrantApiUrl
+    {
+        get => _configuration["Qdrant:BaseUrl"]!;
+    }
     public string OllamaApiGenerateUrl
     {
         get => OllamaApiUrl + "generate";
@@ -46,7 +53,14 @@ public class OllamaService : IOllamaService
     {
         get => OllamaApiUrl + "embeddings";
     }
-
+    public string QdrantFastApiUrl
+    {
+        get => QdrantApiUrl + ":" + _configuration["Qdrant:FastApiPort"];
+    }
+    public string QdrantDbUrl
+    {
+        get => QdrantApiUrl + ":" + _configuration["Qdrant:QdrantPort"];
+    }
 
     public async Task<string> QueryAsync(string query, float temperature, float topP)
     {
@@ -64,7 +78,8 @@ public class OllamaService : IOllamaService
                 top_k = 10
             };
 
-            var qdrantResponse = await _httpClient.PostAsJsonAsync("http://localhost:5002/search", qdrantRequest);
+            var qdrantSearchUrl = QdrantFastApiUrl + "/search";
+            var qdrantResponse = await _httpClient.PostAsJsonAsync(qdrantSearchUrl, qdrantRequest);
             qdrantResponse.EnsureSuccessStatusCode();
 
             var qdrantResult = await qdrantResponse.Content.ReadFromJsonAsync<QdrantSearchResponse>();
@@ -94,17 +109,15 @@ public class OllamaService : IOllamaService
                 }
             };
             // ✅ 這是你漏掉的部分
-            var scrollResponse = await _httpClient.PostAsJsonAsync(
-                "http://localhost:6333/collections/rag_collection/points/scroll",
-                scrollPayload
-            );
+            var scrollUrl = QdrantDbUrl + "/collections/rag_collection/points/scroll";
+            var scrollResponse = await _httpClient.PostAsJsonAsync(scrollUrl, scrollPayload);
             scrollResponse.EnsureSuccessStatusCode();
 
             var scrollResult = await scrollResponse.Content.ReadFromJsonAsync<QdrantScrollResponse>();
 
             _logger.LogInformation("🌐 Scroll spot names from Qdrant: {Count} 項", scrollResult?.Points?.Count ?? 0);
 
-            var allSpotNames = (scrollResult?.Points ?? new List<QdrantScrollPoint>())
+            var allSpotNames = (scrollResult?.Points ?? [])
                 .Select(p =>
                 {
                     // 如果 payload 有 spotName 就用，否則 fallback 用 content 抓 **景點名稱**
@@ -201,9 +214,12 @@ public class OllamaService : IOllamaService
 ";
 
             // 4️⃣ 傳送 prompt 至 DeepSeek 模型
-            var response = await _httpClient.PostAsJsonAsync("http://localhost:11434/api/generate", new
+            var response = await _httpClient.PostAsJsonAsync(OllamaApiGenerateUrl, new
             {
-                model = "deepseek-r1:1.5b",  // 或 "deepseek-r1:7b"
+                model = "deepseek-r1:1.5b",  // 或 "deepseek-r1:7b",
+                prompt = fullPrompt,
+                temperature,
+                top_p = topP,
             });
 
             response.EnsureSuccessStatusCode();
@@ -259,7 +275,9 @@ public class OllamaService : IOllamaService
 
     public async Task InsertToQdrantAsync(string id, float[] embedding, string fileName, string content)
     {
-        await _httpClient.PostAsJsonAsync("http://localhost:5002/insert", new
+        string insertUrl = QdrantFastApiUrl + "/insert";
+
+        await _httpClient.PostAsJsonAsync(insertUrl, new
         //await _httpClient.PostAsJsonAsync("http://localhost:5002/clean_insert", new
         {
             id = Guid.NewGuid().ToString(),  // ✅ 自動產生 UUID 字串
@@ -271,7 +289,8 @@ public class OllamaService : IOllamaService
 
     public async Task<string> SearchQdrantAsync(float[] embedding, int topK = 2)
     {
-        var response = await _httpClient.PostAsJsonAsync("http://localhost:5002/search", new
+        string searchUrl = QdrantFastApiUrl + "/search";
+        var response = await _httpClient.PostAsJsonAsync(searchUrl, new
         {
             embedding = embedding,
             top_k = topK

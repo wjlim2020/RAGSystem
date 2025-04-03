@@ -1,17 +1,15 @@
-﻿using System.Globalization;
-using System.Text.Json.Serialization;
-using System.Text.Json;
-using System.Text;
+﻿using DocumentFormat.OpenXml.Packaging; // Word & PPT
+using DocumentFormat.OpenXml.Wordprocessing;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.IdentityModel.Tokens;
-using DocumentFormat.OpenXml.Packaging; // Word & PPT
-using DocumentFormat.OpenXml.Wordprocessing;
 using OfficeOpenXml; // Excel (EPPlus)
+using RAGSystem.Models;
+using System.Globalization;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.Content;
-using System.Net.Http;
-using RAGSystem.Models;
 
 
 [ApiController]
@@ -22,14 +20,21 @@ public class RagController : ControllerBase
     private readonly IOllamaService _ollamaService;
     private readonly ILogger<RagController> _logger;
     private readonly HttpClient _httpClient;
+    private readonly IConfiguration _configuration;
 
     // ✅ Inject ApplicationDbContext in the constructor
-    public RagController(ApplicationDbContext context, IOllamaService ollamaService, ILogger<RagController> logger ,HttpClient httpClient)
+    public RagController(
+        ApplicationDbContext context,
+        IOllamaService ollamaService,
+        ILogger<RagController> logger,
+        HttpClient httpClient,
+        IConfiguration configuration)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _ollamaService = ollamaService ?? throw new ArgumentNullException(nameof(ollamaService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _httpClient = httpClient;
+        _configuration = configuration;
     }
 
     //public RagController(IOllamaService ollamaService)
@@ -173,7 +178,8 @@ public class RagController : ControllerBase
                 top_k = 10
             };
 
-            var qdrantResponse = await _httpClient.PostAsJsonAsync("http://localhost:5002/search", qdrantRequest);
+            string qdrantUrl = _ollamaService.QdrantFastApiUrl + "/search";
+            var qdrantResponse = await _httpClient.PostAsJsonAsync(qdrantUrl, qdrantRequest);
             qdrantResponse.EnsureSuccessStatusCode();
             var qdrantResult = await qdrantResponse.Content.ReadFromJsonAsync<OllamaService.QdrantSearchResponse>();
 
@@ -191,8 +197,8 @@ public class RagController : ControllerBase
             fullPrompt.AppendLine("Assistant:");
 
             // ✅ 設定你要的參數（可換成前端傳入）
-            float temperature =  0.3f;
-            float topP =  0.2f;
+            float temperature = 0.3f;
+            float topP = 0.2f;
 
             var result = await _ollamaService.QueryAsync(fullPrompt.ToString(), temperature, topP);
             var formattedAnswer = ExtractResponses(result);
@@ -246,7 +252,7 @@ public class RagController : ControllerBase
             await _context.SaveChangesAsync();
 
             // 🔹 呼叫 Qdrant Gateway 插入向量資料
-           await _ollamaService.InsertToQdrantAsync(document.Id.ToString(), embeddingArray, document.FileName, document.Content);
+            await _ollamaService.InsertToQdrantAsync(document.Id.ToString(), embeddingArray, document.FileName, document.Content);
 
 
             return Ok(new { message = "File uploaded successfully.", documentId = document.Id });
@@ -278,7 +284,7 @@ public class RagController : ControllerBase
         {
             // 🔹 產生 embedding
             var embedding = await _ollamaService.GenerateEmbeddingAsync(query);
-
+            Console.WriteLine("Done");
             // 🔹 呼叫 Qdrant Gateway 查相似文件
             var json = await _ollamaService.SearchQdrantAsync(embedding);
 
@@ -323,7 +329,7 @@ public class RagController : ControllerBase
         }
         else if (extension == ".pdf")
         {
-            return ExtractTextFromPdf(stream); 
+            return ExtractTextFromPdf(stream);
         }
 
         return null;
