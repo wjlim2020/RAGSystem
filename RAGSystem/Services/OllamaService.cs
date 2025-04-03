@@ -1,4 +1,4 @@
-﻿using System.Net.Http.Json;
+using System.Net.Http.Json;
 using RAGSystem.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -19,47 +19,33 @@ public class OllamaService : IOllamaService
     private readonly ApplicationDbContext _context;
     private readonly HttpClient _httpClient;
     private readonly ILogger<OllamaService> _logger;
+    private readonly IConfiguration _configuration;
 
-
-    public OllamaService(ApplicationDbContext context, HttpClient httpClient, ILogger<OllamaService> logger)
+    public OllamaService(
+        ApplicationDbContext context,
+        HttpClient httpClient,
+        ILogger<OllamaService> logger,
+        IConfiguration configuration)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _httpClient = httpClient;
         _logger = logger;
         _httpClient.Timeout = TimeSpan.FromMinutes(5);
+        _configuration = configuration;
     }
 
-    //public async Task<string> QueryAsync(string query)
-    //{
-    //    try
-    //    {
-    //        _logger.LogInformation("Sending query to Ollama: {Query}", query);
-
-    //        // Send a POST request to the Ollama API with the full URL and correct body
-    //        //var response = await _httpClient.PostAsJsonAsync("http://localhost:11434/api/generate", new { model = "deepseek-r1:1.5b", prompt = query });
-
-    //        // In OllamaService.cs
-    //        var response = await _httpClient.PostAsJsonAsync("api/generate", new
-    //        {
-    //            model = "deepseek-r1:1.5b",
-    //            prompt = query
-    //        });
-
-    //        // Ensure the request was successful
-    //        response.EnsureSuccessStatusCode();
-
-    //        // Read and return the response content
-    //        var result = await response.Content.ReadAsStringAsync();
-    //        _logger.LogInformation("Received response from Ollama: {Result}", result);
-
-    //        return result;
-    //    }
-    //    catch (HttpRequestException ex)
-    //    {
-    //        _logger.LogError(ex, "Failed to query Ollama: {Message}", ex.Message);
-    //        throw new Exception("Failed to query Ollama. Please check the API URL and ensure the service is running.", ex);
-    //    }
-    //}
+    public string OllamaApiUrl
+    {
+        get => _configuration["OllamaApi:BaseUrl"] + "api/";
+    }
+    public string OllamaApiGenerateUrl
+    {
+        get => OllamaApiUrl + "generate";
+    }
+    public string OllamaApiEmbeddingUrl
+    {
+        get => OllamaApiUrl + "embeddings";
+    }
 
 
     public async Task<string> QueryAsync(string query, float temperature, float topP)
@@ -218,10 +204,6 @@ public class OllamaService : IOllamaService
             var response = await _httpClient.PostAsJsonAsync("http://localhost:11434/api/generate", new
             {
                 model = "deepseek-r1:1.5b",  // 或 "deepseek-r1:7b"
-                //model = "deepseek-r1:7b",  
-                prompt = fullPrompt,
-                temperature = temperature,
-                top_p = topP
             });
 
             response.EnsureSuccessStatusCode();
@@ -246,7 +228,7 @@ public class OllamaService : IOllamaService
         {
             _logger.LogInformation("Sending embedding request to Ollama: {content}", content);
 
-            var response = await _httpClient.PostAsJsonAsync("http://localhost:11434/api/embeddings", new
+            var response = await _httpClient.PostAsJsonAsync(OllamaApiEmbeddingUrl, new
             {
                 model = "bge-m3",
                 prompt = content
