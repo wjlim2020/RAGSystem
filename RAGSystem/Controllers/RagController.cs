@@ -198,11 +198,7 @@ public class RagController : ControllerBase
             fullPrompt.AppendLine($"\nUser: {request.Query}");
             fullPrompt.AppendLine("Assistant:");
 
-            // ✅ 設定你要的參數（可換成前端傳入）
-            float temperature = 0.3f;
-            float topP = 0.2f;
-
-            var result = await _ollamaService.QueryAsync(fullPrompt.ToString(), temperature, topP);
+            var result = await _ollamaService.QueryAsync(fullPrompt.ToString(), request.Temperature, request.TopP);
             var formattedAnswer = ExtractResponses(result);
 
             // ✅ 儲存對話
@@ -273,13 +269,9 @@ public class RagController : ControllerBase
         fullPrompt.AppendLine($"\nUser: {request.Query}");
         fullPrompt.AppendLine("Assistant:");
 
-        // ✅ 設定你要的參數（可換成前端傳入）
-        float temperature = 0.3f;
-        float topP = 0.2f;
-
         string fullResponse = string.Empty;
 
-        await foreach (var chunk in _ollamaService.QueryStreamAsync(fullPrompt.ToString(), temperature, topP, cancellationToken))
+        await foreach (var chunk in _ollamaService.QueryStreamAsync(fullPrompt.ToString(), request.Temperature, request.TopP, cancellationToken))
         {
             if (chunk == null) continue;
 
