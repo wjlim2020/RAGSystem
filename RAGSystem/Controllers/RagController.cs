@@ -1,10 +1,12 @@
 ﻿using DocumentFormat.OpenXml.Packaging; // Word & PPT
 using DocumentFormat.OpenXml.Wordprocessing;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using OfficeOpenXml; // Excel (EPPlus)
 using RAGSystem.Models;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -223,79 +225,77 @@ public class RagController : ControllerBase
 
 
     [HttpPost("query-v3")]
-    public async Task QueryWithMemoryStream([FromBody] QueryRequest request, CancellationToken cancellationToken)
+    public async IAsyncEnumerable<string> QueryWithMemoryStream(
+        [FromBody] QueryRequest request,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        try
+        IHttpResponseBodyFeature? httpResponseBodyFeature = HttpContext.Features.Get<IHttpResponseBodyFeature>();
+        httpResponseBodyFeature?.DisableBuffering();
+
+        var historyList = await _context.ChatHistories
+            .Where(c => c.SessionId == request.SessionId)
+            .OrderByDescending(c => c.Timestamp)
+            .Take(1)
+            .ToListAsync();
+        historyList.Reverse();
+
+        var historyPrompt = new StringBuilder();
+        historyPrompt.AppendLine("Use the following conversation history to answer the user's question.\n");
+
+        foreach (var h in historyList)
         {
-            // 🔍 撈對話歷史
-            var historyList = await _context.ChatHistories
-                .Where(c => c.SessionId == request.SessionId)
-                .OrderByDescending(c => c.Timestamp)
-                .Take(1)
-                .ToListAsync();
-
-            historyList.Reverse(); // 調整順序：舊 → 新
-
-            var historyPrompt = new StringBuilder();
-            historyPrompt.AppendLine("Use the following conversation history to answer the user's question.\n");
-
-            foreach (var h in historyList)
-            {
-                historyPrompt.AppendLine($"User: {h.UserQuery}");
-                historyPrompt.AppendLine($"Assistant: {h.Answer}");
-            }
-
-            // ✅ 呼叫 embedding API，取得查詢向量
-            var embedding = await _ollamaService.GenerateEmbeddingAsync(request.Query);
-
-            // ✅ 呼叫 Qdrant 查詢相關內容
-            var qdrantRequest = new
-            {
-                embedding = embedding,
-                top_k = 10
-            };
-
-            string qdrantUrl = _ollamaService.QdrantFastApiUrl + "/search";
-            var qdrantResponse = await _httpClient.PostAsJsonAsync(qdrantUrl, qdrantRequest);
-            qdrantResponse.EnsureSuccessStatusCode();
-            var qdrantResult = await qdrantResponse.Content.ReadFromJsonAsync<OllamaService.QdrantSearchResponse>();
-
-            var contextPrompt = new StringBuilder();
-            foreach (var doc in qdrantResult.Results)
-            {
-                contextPrompt.AppendLine($"[Context from {doc.FileName}]\n{doc.Content}\n");
-            }
-
-            // ✅ 最終 prompt 結合歷史、向量上下文與用戶提問
-            var fullPrompt = new StringBuilder();
-            fullPrompt.AppendLine(historyPrompt.ToString());
-            fullPrompt.AppendLine(contextPrompt.ToString());
-            fullPrompt.AppendLine($"\nUser: {request.Query}");
-            fullPrompt.AppendLine("Assistant:");
-
-            // ✅ 設定你要的參數（可換成前端傳入）
-            float temperature = 0.3f;
-            float topP = 0.2f;
-
-            var fullResponse = await _ollamaService.QueryStreamAsync(fullPrompt.ToString(), temperature, topP, cancellationToken);
-
-            // ✅ 儲存對話
-            _context.ChatHistories.Add(new ChatHistory
-            {
-                SessionId = request.SessionId,
-                UserQuery = request.Query,
-                Answer = fullResponse
-            });
-            await _context.SaveChangesAsync();
+            historyPrompt.AppendLine($"User: {h.UserQuery}");
+            historyPrompt.AppendLine($"Assistant: {h.Answer}");
         }
-        catch (Exception ex)
+
+        var embedding = await _ollamaService.GenerateEmbeddingAsync(request.Query);
+        var qdrantRequest = new
         {
-            _logger.LogError(ex, "Query-v3 failed");
-            return;
+            embedding = embedding,
+            top_k = 10
+        };
+
+        string qdrantUrl = _ollamaService.QdrantFastApiUrl + "/search";
+        var qdrantResponse = await _httpClient.PostAsJsonAsync(qdrantUrl, qdrantRequest);
+        qdrantResponse.EnsureSuccessStatusCode();
+        var qdrantResult = await qdrantResponse.Content.ReadFromJsonAsync<OllamaService.QdrantSearchResponse>();
+
+        var contextPrompt = new StringBuilder();
+        foreach (var doc in qdrantResult.Results)
+        {
+            contextPrompt.AppendLine($"[Context from {doc.FileName}]\n{doc.Content}\n");
         }
+
+        // ✅ 最終 prompt 結合歷史、向量上下文與用戶提問
+        var fullPrompt = new StringBuilder();
+        fullPrompt.AppendLine(historyPrompt.ToString());
+        fullPrompt.AppendLine(contextPrompt.ToString());
+        fullPrompt.AppendLine($"\nUser: {request.Query}");
+        fullPrompt.AppendLine("Assistant:");
+
+        // ✅ 設定你要的參數（可換成前端傳入）
+        float temperature = 0.3f;
+        float topP = 0.2f;
+
+        string fullResponse = string.Empty;
+
+        await foreach (var chunk in _ollamaService.QueryStreamAsync(fullPrompt.ToString(), temperature, topP, cancellationToken))
+        {
+            if (chunk == null) continue;
+
+            fullResponse += chunk;
+            yield return chunk;
+        }
+
+        // ✅ 儲存對話
+        _context.ChatHistories.Add(new ChatHistory
+        {
+            SessionId = request.SessionId,
+            UserQuery = request.Query,
+            Answer = fullResponse
+        });
+        await _context.SaveChangesAsync();
     }
-
-
 
     [HttpPost("upload")]
     public async Task<IActionResult> UploadFile([FromForm] UploadFileDto uploadFileDto)

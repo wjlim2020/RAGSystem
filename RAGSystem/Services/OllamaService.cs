@@ -1,4 +1,6 @@
+using RAGSystem.Models;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -6,11 +8,9 @@ using System.Text.RegularExpressions;
 public interface IOllamaService
 {
     Task<string> QueryAsync(string query, float temperature, float topP);
-    Task<string> QueryStreamAsync(string query, float temperature, float topP, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<string> QueryStreamAsync(string query, float temperature, float topP, CancellationToken cancellationToken = default);
     Task<float[]> GenerateEmbeddingAsync(string content);
-
     Task InsertToQdrantAsync(string id, float[] embedding, string fileName, string content);
-
     Task<string> SearchQdrantAsync(float[] embedding, int topK = 3);
 
     public string OllamaApiUrl { get; }
@@ -243,132 +243,96 @@ public class OllamaService : IOllamaService
     }
 
 
-    public async Task<string> QueryStreamAsync(string query, float temperature, float topP, CancellationToken cancellationToken = default)
+    public async IAsyncEnumerable<string> QueryStreamAsync(
+        string query,
+        float temperature,
+        float topP,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        var response = _httpContextAccessor.HttpContext!.Response;
-        response.Headers.Append("Content-Type", "text/event-stream");
-        response.Headers.Append("Cache-Control", "no-cache");
-        response.Headers.Append("Connection", "keep-alive");
+        _logger.LogInformation("🔍 Generating embedding for query: {Query}", query);
 
-        try
+        // 1. 將 query 轉換為 embedding
+        var queryEmbedding = await GenerateEmbeddingAsync(query);
+        var qdrantRequest = new
         {
-            _logger.LogInformation("🔍 Generating embedding for query: {Query}", query);
+            embedding = queryEmbedding,
+            top_k = 10
+        };
 
-            // 1️⃣ 呼叫 Ollama embedding API
-            var queryEmbedding = await GenerateEmbeddingAsync(query);
+        var qdrantSearchUrl = QdrantFastApiUrl + "/search";
+        var qdrantResponse = await _httpClient.PostAsJsonAsync(qdrantSearchUrl, qdrantRequest);
+        qdrantResponse.EnsureSuccessStatusCode();
 
-            // 2️⃣ 傳送 embedding 至 Qdrant Gateway /search
-            var qdrantRequest = new
+        var qdrantResult = await qdrantResponse.Content.ReadFromJsonAsync<QdrantSearchResponse>();
+
+        if (qdrantResult == null || qdrantResult.Results.Count == 0)
+        {
+            _logger.LogWarning("⚠️ Qdrant 沒有找到相關內容");
+            throw new Exception("No relevant documents found.");
+        }
+
+        // 3️⃣ 額外呼叫 Qdrant 原生 scroll，查出 chunkType = 名稱 的所有 spotName
+        var scrollPayload = new
+        {
+            collection_name = "rag_collection",
+            limit = 1000,
+            with_payload = true,
+            filter = new
             {
-                embedding = queryEmbedding,
-                top_k = 10
-            };
-
-            var qdrantSearchUrl = QdrantFastApiUrl + "/search";
-            var qdrantResponse = await _httpClient.PostAsJsonAsync(qdrantSearchUrl, qdrantRequest);
-            qdrantResponse.EnsureSuccessStatusCode();
-
-            var qdrantResult = await qdrantResponse.Content.ReadFromJsonAsync<QdrantSearchResponse>();
-
-            if (qdrantResult == null || qdrantResult.Results.Count == 0)
-            {
-                _logger.LogWarning("⚠️ Qdrant 沒有找到相關內容");
-                return "No relevant documents found.";
-            }
-
-            // 3️⃣ 額外呼叫 Qdrant 原生 scroll，查出 chunkType = 名稱 的所有 spotName
-            var scrollPayload = new
-            {
-                collection_name = "rag_collection",
-                limit = 1000,
-                with_payload = true,
-                filter = new
+                must = new[]
                 {
-                    must = new[]
-                    {
                     new
                     {
                         key = "chunkType",
                         match = new { value = "名稱" }
                     }
                 }
-                }
-            };
-            // ✅ 這是你漏掉的部分
-            var scrollUrl = QdrantDbUrl + "/collections/rag_collection/points/scroll";
-            var scrollResponse = await _httpClient.PostAsJsonAsync(scrollUrl, scrollPayload);
-            scrollResponse.EnsureSuccessStatusCode();
-
-            var scrollResult = await scrollResponse.Content.ReadFromJsonAsync<QdrantScrollResponse>();
-
-            _logger.LogInformation("🌐 Scroll spot names from Qdrant: {Count} 項", scrollResult?.Points?.Count ?? 0);
-
-            var allSpotNames = (scrollResult?.Points ?? [])
-                .Select(p =>
-                {
-                    // 如果 payload 有 spotName 就用，否則 fallback 用 content 抓 **景點名稱**
-                    if (!string.IsNullOrEmpty(p?.Payload?.SpotName))
-                        return p.Payload.SpotName.Trim();
-
-                    // 嘗試從 content 中用 **XX** 格式抓名稱
-                    var match = Regex.Match(p?.Payload?.Content ?? "", @"景點名稱：\*\*(.*?)\*\*");
-                    return match.Success ? match.Groups[1].Value.Trim() : null;
-                })
-                .Where(name => !string.IsNullOrEmpty(name))
-                .Distinct()
-                .ToList();
-
-            //// 3️⃣ 組成 prompt
-            //var promptBuilder = new StringBuilder();
-
-            //// 🧠 自動收集所有 spotName（景點名稱）
-            //var spotNames = qdrantResult.Results
-            //    .Where(r => r.ChunkType == "名稱" || r.Content.Contains("景點名稱"))
-            //    .Select(r => !string.IsNullOrEmpty(r.SpotName)
-            //        ? r.SpotName.Trim()
-            //        : Regex.Match(r.Content, @"\*\*(.*?)\*\*").Groups[1].Value?.Trim())
-            //    .Where(name => !string.IsNullOrEmpty(name))
-            //    .Distinct()
-            //    .ToList();
-
-
-            //if (spotNames.Any())
-            //{
-            //    promptBuilder.AppendLine("📍 目前收錄的景點包括：");
-            //    foreach (var spot in spotNames)
-            //    {
-            //        promptBuilder.AppendLine($"- {spot}");
-            //    }
-            //    promptBuilder.AppendLine("\n---\n");
-            //}
-
-            //// 📚 加入每段 context 資料
-            //foreach (var doc in qdrantResult.Results)
-            //{
-            //    promptBuilder.AppendLine($"[Context from {doc.FileName}]\n{doc.Content}\n");
-            //}
-
-
-            // 4️⃣ 組 Prompt
-            var promptBuilder = new StringBuilder();
-
-            if (allSpotNames.Any())
-            {
-                promptBuilder.AppendLine("📍 目前收錄的景點包括：");
-                foreach (var spot in allSpotNames)
-                {
-                    promptBuilder.AppendLine($"- {spot}");
-                }
-                promptBuilder.AppendLine("\n---\n");
             }
+        };
+        // ✅ 這是你漏掉的部分
+        var scrollUrl = QdrantDbUrl + "/collections/rag_collection/points/scroll";
+        var scrollResponse = await _httpClient.PostAsJsonAsync(scrollUrl, scrollPayload);
+        scrollResponse.EnsureSuccessStatusCode();
 
-            foreach (var doc in qdrantResult.Results)
+        var scrollResult = await scrollResponse.Content.ReadFromJsonAsync<QdrantScrollResponse>();
+
+        _logger.LogInformation("🌐 Scroll spot names from Qdrant: {Count} 項", scrollResult?.Points?.Count ?? 0);
+
+        var allSpotNames = (scrollResult?.Points ?? [])
+            .Select(p =>
             {
-                promptBuilder.AppendLine($"[Context from {doc.FileName}]\n{doc.Content}\n");
+                // 如果 payload 有 spotName 就用，否則 fallback 用 content 抓 **景點名稱**
+                if (!string.IsNullOrEmpty(p?.Payload?.SpotName))
+                    return p.Payload.SpotName.Trim();
+
+                // 嘗試從 content 中用 **XX** 格式抓名稱
+                var match = Regex.Match(p?.Payload?.Content ?? "", @"景點名稱：\*\*(.*?)\*\*");
+                return match.Success ? match.Groups[1].Value.Trim() : null;
+            })
+            .Where(name => !string.IsNullOrEmpty(name))
+            .Distinct()
+            .ToList();
+
+        // 4️⃣ 組 Prompt
+        var promptBuilder = new StringBuilder();
+
+        if (allSpotNames.Any())
+        {
+            promptBuilder.AppendLine("📍 目前收錄的景點包括：");
+            foreach (var spot in allSpotNames)
+            {
+                promptBuilder.AppendLine($"- {spot}");
             }
+            promptBuilder.AppendLine("\n---\n");
+        }
+
+        foreach (var doc in qdrantResult.Results)
+        {
+            promptBuilder.AppendLine($"[Context from {doc.FileName}]\n{doc.Content}\n");
+        }
 
 
-            string fullPrompt = $@"
+        string fullPrompt = $@"
 你是一位專業的日本旅遊導覽員。請根據以下提供的旅遊資料，回答使用者的問題。請注意：
 
 - 如果問題涉及「費用」、「開放時間」、「交通方式」，請務必明確列出具體數字。
@@ -396,53 +360,44 @@ public class OllamaService : IOllamaService
 {query}
 
 請根據上方資料直接作答，不要杜撰內容。
-
 ";
 
-            var payload = new
+        var payload = new OllamaGenerateApiRequest()
+        {
+            Model = "deepseek-r1:1.5b",
+            Prompt = fullPrompt,
+            Stream = true,
+            Temperature = temperature,
+            TopP = topP,
+        };
+        var request = new HttpRequestMessage(HttpMethod.Post, OllamaApiGenerateUrl)
+        {
+            Content = JsonContent.Create(payload),
+        };
+
+        using var sourceResponse = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        sourceResponse.EnsureSuccessStatusCode();
+
+        using var stream = await sourceResponse.Content.ReadAsStreamAsync(cancellationToken);
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+
+        string? line;
+        while ((line = await reader.ReadLineAsync(cancellationToken)) != null)
+        {
+            if (cancellationToken.IsCancellationRequested) break;
+            if (string.IsNullOrWhiteSpace(line)) continue;
+
+            var ollamaStreamResponse = JsonSerializer.Deserialize<OllamaStreamResponse>(line);
+            if (ollamaStreamResponse?.Response != null)
             {
-                model = "deepseek-r1:1.5b",  // 或 "deepseek-r1:7b",
-                prompt = fullPrompt,
-                stream = true,
-                temperature,
-                top_p = topP,
-            };
-            var request = new HttpRequestMessage(HttpMethod.Post, OllamaApiGenerateUrl)
-            {
-                Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json")
-            };
-
-            using var sourceResponse = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            sourceResponse.EnsureSuccessStatusCode();
-
-            using var stream = await sourceResponse.Content.ReadAsStreamAsync(cancellationToken);
-            using var reader = new StreamReader(stream, Encoding.UTF8);
-
-            string fullResponse = string.Empty;
-            string? line;
-            while ((line = await reader.ReadLineAsync(cancellationToken)) != null && !cancellationToken.IsCancellationRequested)
-            {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-
-                var jsonChunk = JsonDocument.Parse(line);
-                jsonChunk.RootElement.TryGetProperty("response", out var responseLine);
-                line = responseLine.ToString() ?? "";
-                fullResponse += line;
-
-                Debug.WriteLine("Data: " + line);
-                await response.WriteAsync(line, cancellationToken);
-                await response.Body.FlushAsync(cancellationToken);
+                string chunk = ollamaStreamResponse.Response;
+                Debug.WriteLine($"Chunk: {chunk}");
+                yield return chunk;
             }
 
-            return fullResponse;
-        }
-        catch (HttpRequestException ex)
-        {
-            _logger.LogError(ex, "❌ 發送請求失敗: {Message}", ex.Message);
-            throw new Exception("Failed to query DeepSeek or Qdrant. Please ensure all services are running.", ex);
+            if (ollamaStreamResponse?.Done ?? false) break;
         }
     }
-
 
 
     public async Task<float[]> GenerateEmbeddingAsync(string content)
